@@ -5,7 +5,7 @@ from datetime import datetime
 import grp, pwd
 from fnmatch import fnmatch
 import hashlib
-from math import cell
+from math import ceil
 import os
 import re
 import sys
@@ -51,7 +51,7 @@ class GitRepository(object):
         self.gitdir = os.path.join(path, ".git")
 
         if not (force or os.path.isdir(self.gitdir)):
-            raise Exception("Not a Git repository %s", path)
+            raise Exception("Not a Git repository %s" % path)
         
         # Read configuration file in .git/config
         self.conf = configparser.ConfigParser()
@@ -65,7 +65,7 @@ class GitRepository(object):
         if not force:
             vers = int(self.conf.get("core", "repositoryformatversion"))
             if vers != 0:
-                raise Exception("Unsupported repositoryformatversion %s", vers)
+                raise Exception("Unsupported repositoryformatversion %s" % vers)
 
 
 def repo_path(repo, *path):
@@ -95,7 +95,7 @@ def repo_dir(repo, *path, mkdir=False):
         if os.path.isdir(path):
             return path
         else:
-            raise Exception("Not a directory %s", path)
+            raise Exception("Not a directory %s" % path)
         
     if mkdir:
         os.makedirs(path)
@@ -112,9 +112,9 @@ def repo_create(path):
     # First, we make sure the path either doesn't exist or is an empty dir.
     if os.path.exists(repo.worktree):
         if not os.path.isdir(repo.worktree):
-            raise Exception("%s is not a directory!", path)
+            raise Exception("%s is not a directory!" % path)
         if os.path.exists(repo.gitdir) and os.listdir(repo.gitdir):
-            raise Exception("%s is not empty!", path)
+            raise Exception("%s is not empty!" % path)
     else:
         os.makedirs(repo.worktree)
 
@@ -128,7 +128,7 @@ def repo_create(path):
         f.write("Unnamed repository; edit this file 'description' to name the repository.\n")
 
     # .git/HEAD
-    with open(repo_file(repo, "HEAD"), "W") as f:
+    with open(repo_file(repo, "HEAD"), "w") as f:
         f.write("ref: refs/heads/master\n")
     
     with open(repo_file(repo, "config"), "w") as f:
@@ -147,3 +147,95 @@ def repo_default_config():
     ret.set("core", "bare", "false")
 
     return ret
+
+
+argsp = argsubparsers.add_parser("init", help="Initialize a new, empty repository.")
+argsp.add_argument("path",
+                    metavar="directory", 
+                    nargs="?", 
+                    default=".", 
+                    help="Where to create the repository.")
+
+
+def cmd_init(args):
+    repo_create(args.path)
+
+def repo_find(path=".", required=True):
+    path = os.path.realpath(path)
+
+    if os.path.isdir(os.path.join(path, ".git")):
+        return GitRepository(path)
+    
+    # If we haven't returned, recurse in parent
+    parent = os.path.realpath(os.path.join(path, ".."))
+
+    if parent == path:
+        # Bottom case, "/.." == "/"
+        if required:
+            raise Exception("No git directory exist.")
+        else:
+            return None
+        
+    # Recursive case
+    return repo_find(parent, required)
+
+
+class GitObject(object):
+    def __init__(self, data=None) -> None:
+        if data != None:
+            self.deserialize(data)
+        else:
+            self.init()
+        
+    def serialize(self, repo):
+        """
+        This function MUST be implemented by subclasses. It mus tread the object's
+        contents from self.data, a byte string, and do whatever it takes to convert
+        it into a meaningful representation. What exactly that means depend on each
+        subclass.
+        """
+        raise Exception("Unimplemented serialize()!")
+    
+    def deserialize(self, data):
+        raise Exception("Unimplemented deserialize()!")
+    
+    def init(self):
+        pass
+
+
+def object_read(repo, sha):
+    """
+    Read object sha from Git repository.
+    Return a Git Object whose exact type depends on the object.
+    """
+
+    path = repo_file(repo, "objects", sha[0:2], sha[2:])
+
+    if not os.path.isfile(path):
+        return None
+    
+    with open(path, "rb") as f:
+        raw = zlib.decompress(f.read())
+
+        # Read object type
+        x = raw.find(b' ')
+        fmt = raw[0:x]
+
+        # Read and validate object size
+        y = raw.find(b'\x00', x)
+        size = int(raw[x:y].decode("ascii"))
+        if size != len(raw) - y - 1:
+            raise Exception("Malformed object {0}: bad length!".format(sha))
+        
+        # Pick constructor
+        match fmt:
+            case b"commit": c = GitCommit
+            case b"tree": c = GitTree
+            case b"tag": c = GitTag
+            case b"blob": c = GitBlob
+            case _:
+                raise Exception("Unknown type {0} for object {1}".format(fmt.decode("ascii"), sha))
+            
+        # Call constructor and return object
+
+        return c(raw[y+1:])

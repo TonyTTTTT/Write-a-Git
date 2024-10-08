@@ -1,0 +1,1 @@
+- This is a project which follow the tutorial in [https://wyag.thb.lt/](https://wyag.thb.lt/) which built a simple version of Git.

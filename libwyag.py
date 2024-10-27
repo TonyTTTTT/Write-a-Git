@@ -464,3 +464,118 @@ def log_graphviz(repo, sha, seen):
         p = p.decode("ascii")
         print(" c_{0} -> c_{1};".format(sha, p))
         log_graphviz(repo, p, seen)
+
+
+class GitTreeLeaf(object):
+    def __init__(self, mode, path, sha):
+        self.mode = mode
+        self.path = path
+        self.sha = sha
+
+def tree_parse_one(raw, start=0):
+    # Find the space terminator of the mode
+
+    x = raw.find(b' ', start)
+    assert x - start == 5 or x - start == 6
+
+    # Read the mode
+    mode = raw[start: x]
+    if len(mode) == 5:
+        # Normalize to six bytes
+        mode = b" " + mode
+
+    # Find the NULL terminator of the path
+    y = raw.find(b'\x00', x)
+    # and read the path
+    path = raw[x+1: y]
+    
+    # Read the SHA and convert to a hex string
+    sha = format(int.from_bytes(raw[y+1: y+21], "big"), "040x")
+    
+    return y+21, GitTreeLeaf(mode, path.decode("utf8"), sha)
+
+def tree_parse(raw):
+    pos = 0
+    max = len(raw)
+    ret = list()
+
+    while pos < max:
+        pos, data = tree_parse_one(raw, pos)
+        ret.append(data)
+    
+    return ret
+
+# Notice this isn't a coparison function, but a conversion function.
+# Python's default sort doesn't accept a custom comparison function like in most languages,
+# but a 'key arguments that returns a new value, which is compared using the default rules.
+# So we just return the leaf name, with an extra / if it's a directory.
+def tree_leaf_sort_key(leaf):
+    if leaf.mode.startswith(b"10"):
+        return leaf.path
+    else:
+        return leaf.path + "/"
+    
+def tree_serialize(obj):
+    obj.items.sort(key=tree_leaf_sort_key)
+    ret = b''
+
+    for i in obj.items:
+        ret += i.mode
+        ret += b' '
+        ret += i.path.encode("utf8")
+        ret += b"\x00"
+        sha = int(i.sha, 16)
+        ret += sha.to_bytes(20, byteorder="big")
+
+    return ret
+
+class GitTree(GitObject):
+    fmt = b"tree"
+
+    def deserialize(self, data):
+        self.items = tree_parse(data)
+
+    def serialize(self):
+        return tree_serialize(self)
+    
+    def init(self):
+        self.items = list()
+
+argsp = argsubparsers.add_parser("ls-tree", help="Pretty-print a tree object.")
+argsp.add_argument("-r",
+                   dest="recursive",
+                   action="store_true",
+                   help="Recurse into sub-trees")
+
+argsp.add_argument("tree", help="A tree-ish object.")
+
+def cmd_ls_tree(args):
+    repo = repo_find()
+    ls_tree(repo, args.tree, args.recursive)
+
+def ls_tree(repo, ref, recursive=None, prefix=""):
+    sha = object_find(repo, ref, fmt=b"tree")
+    obj = object_read(repo, sha)
+    for item in obj.items:
+        if len(item.mode) == 5:
+            type = item.mode[0:1]
+        else:
+            type = item.mode[0:2]
+        
+        match type: # Determine the type.
+            case b"04": type = "tree"
+            case b"10": type = "blob" # A regular file.
+            case b"12": type = "blob" # A symlink. Blob contents is link target.
+            case b"16": type = "commit" # A submodule
+            case _: raise Exception("Weird tree leaf mode {}".format(item.mode))
+
+        if not (recursive and type == "tree"): # This is a leaf
+            print("{0} {1} {2}\t{3}".format(
+                "0" * (6 - len(item.mode)) + item.mode.decode("ascii"),
+                type, # Git's ls-tree displays the type of the object pointed to. We can do that too :)
+                item.sha,
+                os.path.join(prefix, item.path)
+
+            ))
+        else: # This is a branch, recurse
+            ls_tree(repo, item.sha, recursive, os.path.join(prefix, item.path))

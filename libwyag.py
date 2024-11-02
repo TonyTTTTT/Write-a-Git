@@ -294,7 +294,39 @@ def cat_file(repo, obj, fmt=None):
     sys.stdout.buffer.write(obj.serialize())
 
 def object_find(repo, name, fmt=None, follow=True):
-        return name
+        # sha: list() or None
+        sha = object_resolve(repo, name)
+
+        if not sha:
+            raise Exception("No such reference {0}".format(name))
+        
+        if len(sha) > 1:
+            raise Exception("Ambiguous reference {0}: Candidates are:\n - {1}.".format(name, "\n - ".join(sha)))
+        
+        sha = sha[0]
+
+        if not fmt:
+            return sha
+        
+        while True:
+            obj = object_read(repo, sha)
+            #     ^^^^^^^^^^ < this is a bit aggressive: we're reading the full object
+            # just to get its type. And we're doing that in a loop, albeit normally short.
+            # Don't expect high performance here.
+
+            if obj.fmt == fmt:
+                return sha
+            
+            if not follow:
+                return None
+            
+            # Follow tags
+            if obj.fmt == b"tags":
+                sha = obj.kvlm[b"object"].decode("ascii")
+            elif obj.fmt == b"commit" and fmt == b"tree":
+                sha = obj.kvlm[b"tree"].decode("ascii")
+            else:
+                return None
 
 
 argsp = argsubparsers.add_parser("hash-object", help="Compute object ID and optionally creates a blob from a file")
@@ -563,7 +595,7 @@ def ls_tree(repo, ref, recursive=None, prefix=""):
             type = item.mode[0:2]
         
         match type: # Determine the type.
-            case b"04": type = "tree"
+            case b" 4": type = "tree"
             case b"10": type = "blob" # A regular file.
             case b"12": type = "blob" # A symlink. Blob contents is link target.
             case b"16": type = "commit" # A submodule
@@ -592,7 +624,7 @@ def cmd_checkout(args):
 
     # If the object is a commit, we grab its tree
     if obj.fmt == b"commit":
-        obj = object_read(repo, obj,kvlm[b"tree"].decode("ascii"))
+        obj = object_read(repo, obj.kvlm[b"tree"].decode("ascii"))
 
     # Verify that path is an empty directory
     if os.path.exists(args.path):
@@ -619,7 +651,7 @@ def tree_checkout(repo, tree, path):
                 f.write(obj.blobdata)
 
 
-def ref_resolver(repo, ref):
+def ref_resolve(repo, ref):
     path = repo_file(repo, ref)
 
     # Sometimes, an indirect reference may be broken. This is normal in one specific case:
@@ -633,7 +665,7 @@ def ref_resolver(repo, ref):
         data = fp.read()[:-1] # Drop final \n
     
     if data.startswith("ref: "):
-        return ref_resolver(repo, data[5:])
+        return ref_resolve(repo, data[5:])
     else:
         return data
     
@@ -651,7 +683,7 @@ def ref_list(repo, path=None):
         if os.path.isdir(can):
             ret[f] = ref_list(repo, can)
         else:
-            ret[f] = ref_resolver(repo, can)
+            ret[f] = ref_resolve(repo, can)
         
     return ret
 
@@ -727,3 +759,61 @@ def tag_create(repo, name, ref, create_tag_object=False):
 def ref_create(repo, ref_name, sha):
     with open(repo_file(repo, "refs/" + ref_name), "w") as fp:
         fp.write(sha + "\n")
+
+def object_resolve(repo, name) -> list:
+    """
+    Resolve name to an object hash in repo.
+    
+    This function is aware of:
+    - the HEAD literal
+    - short and long hashes
+    - tags
+    - branches
+    - remote branches
+    """
+
+    candidates = list()
+    hashRE = re.compile(r"^[0-9A-Fa-f]{4,40}$")
+
+    # Empty string? Abort.
+    if not name.strip():
+        return None
+    
+    # Head is nonambiguous
+    if name == "HEAD":
+        return [ref_resolve(repo, "HEAD")]
+
+    # If it's a hex string, try for a hash.
+    if hashRE.match(name):
+        # This may be a hash, either small or full. 4 seems to be teh minimal
+        # length for git to consider something a short hash.
+        # This limit is documented in man git-rev-parse
+        name = name.lower()
+        prefix = name[0:2]
+        path = repo_dir(repo, "objects", prefix, mkdir=False)
+
+        if path:
+            rem = name[2:]
+            for f in os.listdir(path):
+                if f.startswith(rem):
+                    # Notice a string startswith() itself, so this works for full hahses
+                    candidates.append(prefix + f)
+    
+    # Try for references.
+    as_tag = ref_resolve(repo, "refs/tags/" + name)
+    if as_tag:
+        candidates.append(as_tag)
+
+    # Try for branches.
+    as_branch = ref_resolve(repo, "refs/heads/" + name)
+    if as_branch:
+        candidates.append(as_branch)
+
+    return candidates
+
+
+
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

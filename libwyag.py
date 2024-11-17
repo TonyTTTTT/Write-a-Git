@@ -1001,7 +1001,7 @@ def index_read(repo):
                                      flag_stage=flag_stage,
                                      name=name))
 
-        return GitIndex(version=version, entries=entries)
+    return GitIndex(version=version, entries=entries)
 
 argsp = argsubparsers.add_parser("ls-files", help="List all the stage files")
 argsp.add_argument("--verbose",
@@ -1015,7 +1015,7 @@ def cmd_ls_files(args):
         print("Index file format v{}, containing {} entries.\n".format(index.version, len(index.entries)))
 
     for e in index.entries:
-        print("{}\n=========================".format(e.name))
+        print(e.name)
         
         if args.verbose:
             print(" {} with perms: {:o}".format(

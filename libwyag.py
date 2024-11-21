@@ -1107,7 +1107,7 @@ def gitignore_read(repo):
         with open(global_file, "r") as f:
             ret.absolute.append(gitignore_parse(f.readlines))
     
-    # .gitignore files in the index
+    # .gitignore files in the index (should be in the worktree)
     index = index_read(repo)
 
     for entry in index.entries:
@@ -1116,6 +1116,7 @@ def gitignore_read(repo):
             contents = object_read(repo, entry.sha)
             lines = contents.blobdata.decode("utf8").splitlines()
             ret.scoped[dir_name] = gitignore_parse(lines)
+    
 
     return ret
 
@@ -1123,7 +1124,7 @@ def check_ignore_compare(rules, path):
     result = None
 
     for (pattern, value) in rules:
-        if fnmatch(path, pattern):
+        if fnmatch(path, pattern) or path.startswith(pattern):
             result = value
     
     return result

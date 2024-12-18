@@ -241,7 +241,7 @@ def object_read(repo, sha):
         return c(raw[y+1:])
 
 
-def object_write(obj, repo=None):
+def object_write(obj, repo=None) -> str: 
     # Serialize object data
     data = obj.serialize()
 
@@ -259,8 +259,6 @@ def object_write(obj, repo=None):
             with open(path, 'wb') as f:
                 # Compress and write
                 f.write(zlib.compress(result))
-        else:
-            raise Exception("Same hash already occur!")
 
     return sha
 
@@ -595,7 +593,7 @@ def ls_tree(repo, ref, recursive=None, prefix=""):
             type = item.mode[0:2]
         
         match type: # Determine the type.
-            case b" 4": type = "tree" # @FIXME on tutorial "04" but I found out " 4" really work
+            case b"04": type = "tree" # @FIXME on tutorial "04" but I found out " 4" really work
             case b"10": type = "blob" # A regular file.
             case b"12": type = "blob" # A symlink. Blob contents is link target.
             case b"16": type = "commit" # A submodule
@@ -1124,7 +1122,7 @@ def check_ignore_compare(rules, path):
     result = None
 
     for (pattern, value) in rules:
-        if fnmatch(path, pattern) or path.startswith(pattern):
+        if fnmatch(path, pattern):
             result = value
     
     return result
@@ -1204,7 +1202,7 @@ def tree_to_dict(repo, ref, prefix=""):
 
         # We read the object to extract its type (this is uselessly expensive:
         # we could just open it as a file and read teh first few bytes)
-        is_subtree = leaf.mode.startswith(b" 4")# @FIXME on tutorial "04" but I found out " 4" really work
+        is_subtree = leaf.mode.startswith(b"04") or leaf.mode.startswith(b" 4")# @FIXME on tutorial "04" but I found out " 4" really work
 
         # Depending on the type, we either store the path(if it's a blob, so a regular file),
         # or recurse(if it's another tree, so a subdir)
@@ -1429,6 +1427,129 @@ def add(repo:GitRepository, paths, delete=True, skip_missing=False):
         
         # Write the index back
         index_write(repo, index)
+
+
+argsp = argsubparsers.add_parser("commit", help="Record changes to the repository.")
+argsp.add_argument("-m",
+                   metavar="message",
+                   dest="message",
+                   help="Message to associate with this commit.")
+
+def gitconfig_read():
+    xdg_config_home = os.environ["XDG_CONFIG_HOME"] if "XDG_CONFIG_HOME" in os.environ else "~/config"
+    configfiles = [
+        os.path.expanduser(os.path.join(xdg_config_home, "git/config")),
+        os.path.expanduser("~/.gitconfig")
+    ]
+
+    config = configparser.ConfigParser()
+    config.read(configfiles)
+
+    return config
+
+def gitconfig_user_get(config):
+    if "user" in config:
+        if "name" in config["user"] and "email" in config["user"]:
+            return "{} <{}>".format(config["user"]["name"], config["user"]["email"])
+    
+    return None
+
+def tree_from_index(repo: GitRepository, index: GitIndex):
+    contents = dict()
+    contents[""] = list()
+
+    # Enumerate entries, and turn them into a dictionary where keys are directories, and values are lists of directory contents.
+    for entry in index.entries:
+        dirname = os.path.dirname(entry.name)
+
+        # We create all dictionary entries up to root(""). We need them *all*, 
+        # because even if a directory holds no files it will contain at least a tree.
+        key = dirname
+        while key != "":
+            if not key in contents:
+                contents[key] = list()
+            key = os.path.dirname(key)
+        
+        # For now, simply store the entry in the list
+        contents[dirname].append(entry)
+
+    # Get keys (= directories) and sort them by length descending. This means that we'll always encounter a given path before its parent,
+    # which is all we need, since for each directory D we'll need to modify its parent P to add D's tree.
+    sorted_paths = sorted(contents.keys(), key=len, reverse=True)
+
+    # This variable will store the current tree's SHA-1.
+    # After we're done iterating over our dict, it will contain the hash for the root tree.
+    sha = None
+
+    # We go through the sorted list of path (dict keys)
+    for path in sorted_paths:
+        # Prepare a new, empty tree object
+        tree = GitTree()
+
+        # Add each entry to our new tree, in turn
+        for entry in contents[path]:
+            # An entry can be a normal GitIndexEntry read from the index, or a tree we've created.
+            if isinstance(entry, GitIndexEntry): # Regular entry (a file)
+                # We transcode the mode: the entry stores as integer, we need an octal ASCII representation for the tree.
+                leaf_mode = "{:02o}{:04o}".format(entry.mode_type, entry.mode_perms).encode("ascii")
+                leaf = GitTreeLeaf(mode=leaf_mode, path=os.path.basename(entry.name), sha=entry.sha)
+            else: # Tree. We've stored it as a pair: (basename, SHA)
+                leaf = GitTreeLeaf(mode=b"040000", path=entry[0], sha=entry[1])
+
+            tree.items.append(leaf)
+
+        # Write the new tree object to the store.
+        sha = object_write(tree, repo)
+
+        # Add the new tree hash to the current dictionary's parent, as a pair (basename, SHA)
+        parent = os.path.dirname(path)
+        base = os.path.basename(path) # The name without the path, eg. main.go for src/main.go
+        contents[parent].append((base, sha))
+    
+    return sha
+
+def commit_create(repo: GitRepository, tree, parent, author, timestamp: datetime, message) -> str:
+    commit = GitCommit() # Create the new commit object.
+    commit.kvlm[b"tree"] = tree.encode("ascii")
+    if parent:
+        commit.kvlm[b"parent"] = parent.encode("ascii")
+
+    # Format timezone
+    offset = int(timestamp.astimezone().utcoffset().total_seconds())
+    hours = offset // 3600
+    minutes = (offset % 3600) // 60
+    tz = "{}{:02}{:02}".format("+" if offset > 0 else "-", hours, minutes)
+
+    author = author + timestamp.strftime(" %s ") + tz
+
+    commit.kvlm[b"author"] = author.encode("utf8")
+    commit.kvlm[b"committer"] = author.encode("utf8")
+    commit.kvlm[None] = message.encode("utf8")
+
+    return object_write(commit, repo)
+
+def cmd_commit(args):
+    repo = repo_find()
+    index = index_read(repo)
+
+    # Create trees, grab back SHA for the root tree.
+    tree = tree_from_index(repo, index)
+
+    # Create the commit object itself
+    commit = commit_create(repo, tree, 
+                           object_find(repo, "HEAD"), 
+                           gitconfig_user_get(gitconfig_read()),
+                           datetime.now(),
+                           args.message)
+
+    # Update HEAD so our commit is now the top of the active branch.
+    active_branch = branch_get_active(repo)
+    if active_branch: # If we're on a branch, we update refs/heads/BRANCH
+        with open(repo_file(repo, os.path.join("refs/heads", active_branch)), "w") as fd:
+            fd.write(commit + "\n")
+    else: # Otherwise, we update HEAD ifself.
+        with open(repo_file(repo, "HEAD"), "w") as fd:
+            fd.write(commit + "\n") # @FIXME: Does this work?
 
 
 if __name__ == "__main__":

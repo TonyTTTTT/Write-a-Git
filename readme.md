@@ -17,7 +17,3 @@
 - the mode refer to tree still have to be both ' 4' and '04' in tree_to_dict() in order status cmd to function correctly with the commit fire by git and wyag respectively
 - error when push to github
     - remote: fatal: fsck error in packed object
-
-
-## TO DO
-- clone a new repository from github and solve the above issues from it

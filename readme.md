@@ -18,3 +18,7 @@
 - the mode refer to tree still have to be both ' 4' and '04' in tree_to_dict() in order status cmd to function correctly with the commit fire by git and wyag respectively
 - error when push to github
     - remote: fatal: fsck error in packed object
+    - seems like the object create by wyag is not compatible to git
+
+## Refactor
+- keep only cmd_ bridge function in libwyag.py
